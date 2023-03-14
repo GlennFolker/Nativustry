@@ -1,63 +1,160 @@
-apply plugin: "java"
+buildscript{
+    dependencies{
+        classpath "com.github.Anuken.Arc:arc-core:$mindustryVersion"
+    }
 
+    repositories{
+        mavenCentral()
+        maven{ url 'https://www.jitpack.io' }
+    }
+}
+
+plugins{
+    id 'java'
+    id 'maven-publish'
+}
+
+group 'com.github.GlennFolker'
 version '1.0'
 
-targetCompatibility = 8
-sourceCompatibility = JavaVersion.VERSION_16
+sourceSets.main.java.srcDirs = ['src']
 
-sourceSets.main.java.srcDirs = ["src"]
+dependencies{
+    compileOnly "com.github.Anuken.Arc:arc-core:$arcVersion"
+    compileOnly "com.github.Anuken.MindustryJitpack:core:$mindustryVersion"
+}
 
 repositories{
     mavenCentral()
     maven{ url 'https://www.jitpack.io' }
 }
 
-ext{
-    //the build number that this mod is made for
-    mindustryVersion = 'v142'
-    jabelVersion = "93fde537c7"
-    sdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
-}
+import arc.util.io.*
+import arc.struct.*
 
-//java 8 backwards compatibility flag
-allprojects{
-    tasks.withType(JavaCompile){
-        options.compilerArgs.addAll(['--release', '8'])
+sourceCompatibility = 8
+targetCompatibility = 8
+
+configurations.all{
+    resolutionStrategy.eachDependency{details ->
+        if(details.requested.group == 'com.github.Anuken.Arc'){
+            details.useVersion "$arcVersion"
+        }
     }
 }
 
-dependencies{
-    compileOnly "com.github.Anuken.Arc:arc-core:$mindustryVersion"
-    compileOnly "com.github.Anuken.MindustryJitpack:core:$mindustryVersion"
+file("$rootDir/local.properties").with{
+    if(it.exists()){
+        def map = new StringMap()
+        it.withReader{PropertiesUtils.load(map, it)}
 
-    annotationProcessor "com.github.Anuken:jabel:$jabelVersion"
+        for(def e : map) ext."$e.key" = e.value
+    }
 }
 
-//force arc version
-configurations.all{
-    resolutionStrategy.eachDependency { details ->
-        if(details.requested.group == 'com.github.Anuken.Arc'){
-            details.useVersion "$mindustryVersion"
+ext{
+    sdkRoot = System.getenv("ANDROID_SDK_ROOT") ?: System.getenv("ANDROID_HOME")
+
+    nativesDebug = project.hasProperty('natives.debug') && Boolean.parseBoolean(project.property('natives.debug'))
+    nativesTargets = project.hasProperty('natives.targets')
+        ? project.property('natives.targets').split('\\s+')
+        : new ArrayList<String>()
+}
+
+tasks.withType(JavaCompile){
+    options.release = 8
+
+    options.incremental = true
+    options.encoding = 'UTF-8'
+}
+
+javadoc{
+    options.encoding = 'UTF-8'
+}
+
+task compileNatives{
+    doFirst{
+        delete "$rootDir/libs"
+        mkdir "$rootDir/libs"
+
+        def targets = [
+            'i686-pc-windows-gnu',
+            'x86_64-pc-windows-gnu',
+
+            'i686-unknown-linux-gnu',
+            'armv7-unknown-linux-gnueabihf',
+            'x86_64-unknown-linux-gnu',
+            'aarch64-unknown-linux-gnu',
+
+            'x86_64-apple-darwin',
+            'aarch64-apple-darwin',
+
+            'i686-linux-android',
+            'armv7-linux-androideabi',
+            'x86_64-linux-android',
+            'aarch64-linux-android'
+        ]
+
+        for(def target : targets){
+            def prefix = target.contains('windows') ? '' : 'lib',
+                ext = target.contains('windows') ? 'dll' : target.contains('apple') ? 'dylib' : 'so',
+                arch =
+                    target.startsWith('i686') ? '' :
+                    target.startsWith('x86_64') ? '64' :
+                    target.startsWith('armv7') ? 'arm' :
+                    'arm64',
+                destination =
+                    target.contains('windows') ? 'windows' :
+                    target.contains('android') ? 'android' :
+                    target.contains('apple') ? 'apple' :
+                    'linux',
+                artifact = "${prefix}natives.${ext}",
+                name = "${prefix}natives${arch}.${ext}"
+
+            if(nativesTargets.size() > 0 && !nativesTargets.contains(target)) continue
+
+            def command
+            if(!target.contains('android')){
+                command = "cargo build --target $target --profile ${nativesDebug ? 'dev' : 'release'}"
+            }else{
+                def t =
+                    target.startsWith('i686') ? 'x86' :
+                    target.startsWith('x86_64') ? 'x86_64' :
+                    target.startsWith('armv7') ? 'armeabi-v7a' :
+                    'arm64-v8a'
+
+                command = "cargo ndk --target $t --platform $androidAPILevel build --profile ${nativesDebug ? 'dev' : 'release'}"
+            }
+
+            if(System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')) command = "cmd /c $command"
+
+            command.execute(null, new File("$rootDir/natives")).waitForProcessOutput(System.out, System.err)
+            copy{
+                from "$rootDir/natives/target/$target/${nativesDebug ? 'debug' : 'release'}/$artifact"
+                into "$rootDir/libs/$destination"
+                rename{ name }
+            }
         }
     }
 }
 
 task jarAndroid{
-    dependsOn "jar"
+    dependsOn jar
 
     doLast{
-        if(!sdkRoot || !new File(sdkRoot).exists()) throw new GradleException("No valid Android SDK found. Ensure that ANDROID_HOME is set to your Android SDK directory.");
+        if(!sdkRoot || !new File(sdkRoot).exists()) throw new GradleException("No valid Android SDK found. Ensure that ANDROID_SDK_ROOT is set to your Android SDK directory.");
 
         def platformRoot = new File("$sdkRoot/platforms/").listFiles().sort().reverse().find{ f -> new File(f, "android.jar").exists()}
 
         if(!platformRoot) throw new GradleException("No android.jar found. Ensure that you have an Android platform installed.")
 
-        //collect dependencies needed for desugaring
-        def dependencies = (configurations.compileClasspath.asList() + configurations.runtimeClasspath.asList() + [new File(platformRoot, "android.jar")]).collect{ "--classpath $it.path" }.join(" ")
+        def dependencies = (configurations.compileClasspath.asList() + configurations.runtimeClasspath.asList()).collect{ "--classpath $it.path" }.join(" ")
+        def library = "--lib ${new File(platformRoot, 'android.jar').path}"
 
-        //dex and desugar files - this requires d8 in your PATH
-        "d8 $dependencies --min-api 14 --output ${project.archivesBaseName}Android.jar ${project.archivesBaseName}Desktop.jar"
-            .execute(null, new File("$buildDir/libs")).waitForProcessOutput(System.out, System.err)
+        def command = "d8 $library $dependencies --min-api 14 --output ${project.archivesBaseName}Android.jar ${project.archivesBaseName}Desktop.jar"
+        if(System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows')) command = "cmd /c $command"
+
+        command.execute(null, new File("$buildDir/libs")).waitForProcessOutput(System.out, System.err)
     }
 }
 
@@ -69,11 +166,8 @@ jar{
     }
 
     from(rootDir){
-        include "mod.hjson"
-    }
-
-    from("assets/"){
-        include "**"
+        include 'mod.json'
+        include 'libs/**'
     }
 }
 

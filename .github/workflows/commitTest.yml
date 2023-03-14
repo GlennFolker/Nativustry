@@ -3,6 +3,10 @@ name: Commit Testing
 on: [push]
 
 jobs:
+  buildNatives:
+    strategy:
+      matrix:
+        os: 
   buildJar:
     runs-on: ubuntu-latest
 

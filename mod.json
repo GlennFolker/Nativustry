@@ -1,0 +1,11 @@
+{
+    "name": "nativustry",
+    "displayName": "Nativustry",
+    "author": "GlennFolker",
+    "main": "nativustry.Nativustry",
+    "description": "A Mindustry Java mod that loads native shared library at runtime.",
+    "version": 1.0,
+    "minGameVersion": 142,
+    "hidden": true,
+    "java": true,
+}
